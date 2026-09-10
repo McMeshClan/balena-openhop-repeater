@@ -7,6 +7,8 @@ services:
       args:
         TARGET_HASH: "origin/dev"
         #TARGET_HASH: "dcaa4ac"
+    environment:
+      OPENHOP_PLUGIN_MANAGER: "1"
     privileged: true
     cap_add:
       - SYS_RAWIO

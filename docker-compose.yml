@@ -26,6 +26,7 @@ services:
       args:
         TARGET_HASH: "origin/dev"
         #TARGET_HASH: "dcaa4ac"
+    # Added environment variable to try to enable plugin manager, possibly NOT needed
     environment:
       OPENHOP_PLUGIN_MANAGER: "1"
     privileged: true
@@ -56,4 +57,5 @@ services:
 volumes:
   config:
   data:
+  # Added volume for plugins
   openhop-plugins: # Persistent volume for the plugin manager

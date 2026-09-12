@@ -7,17 +7,11 @@ services:
     privileged: true
     restart: always
     volumes:
-      openhop-plugins:/app/plugins # Mount point for downloaded plugins
+      - openhop-plugins:/app/plugins # Mount point for downloaded plugins
     environment:
-      OPENHOP_PLUGIN_DIR=/app/plugins
-      OPENHOP_ENABLE_PLUGINS=true
+      - OPENHOP_PLUGIN_DIR=/app/plugins
+      - OPENHOP_ENABLE_PLUGINS=true
     # If the modem requires separate handling, link it or use network_mode: host
-
-  # If you are using the new decoupled modem layer:
-  openhop-modem:
-    image: ghcr.io/openhop-dev/openhop_modem:latest
-    privileged: true
-    restart: always
 
   # REPEATER SERVICE
   openhop-repeater:
@@ -26,9 +20,11 @@ services:
       args:
         TARGET_HASH: "origin/dev"
         #TARGET_HASH: "dcaa4ac"
-    # Added environment variable to try to enable plugin manager, possibly NOT needed
-    #environment:
-    #  OPENHOP_PLUGIN_MANAGER: "1"
+    # Added environment variables to try to enable plugin manager
+    environment:
+      - OPENHOP_PLUGIN_MANAGER=1        # Possibly NOT needed
+      - OPENHOP_PLUGIN_DIR=/app/plugins
+      - OPENHOP_ENABLE_PLUGINS=true
     privileged: true
     cap_add:
       - SYS_RAWIO
@@ -49,6 +45,7 @@ services:
     volumes:
       - config:/etc/openhop_repeater
       - data:/var/lib/openhop_repeater
+      - openhop-plugins:/app/plugins # Mount point for downloaded plugins
     group_add:
       - "plugdev"
       - "gpio"

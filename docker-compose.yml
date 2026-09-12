@@ -1,6 +1,25 @@
 version: '2.1'
 
 services:
+  # CORE SERVICE
+  openhop-core:
+    build: ./openhop-core
+    privileged: true
+    restart: always
+    volumes:
+      - 'openhop-plugins:/app/plugins' # Mount point for downloaded plugins
+    environment:
+      - OPENHOP_PLUGIN_DIR=/app/plugins
+      - OPENHOP_ENABLE_PLUGINS=true
+    # If the modem requires separate handling, link it or use network_mode: host
+
+  # If you are using the new decoupled modem layer:
+  openhop-modem:
+    image: ghcr.io/openhop-dev/openhop_modem:latest
+    privileged: true
+    restart: always
+
+  # REPEATER SERVICE
   openhop-repeater:
     build: 
       context: .
@@ -37,3 +56,4 @@ services:
 volumes:
   config:
   data:
+  openhop-plugins: # Persistent volume for the plugin manager

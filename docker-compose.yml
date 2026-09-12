@@ -7,10 +7,10 @@ services:
     privileged: true
     restart: always
     volumes:
-      - 'openhop-plugins:/app/plugins' # Mount point for downloaded plugins
+      openhop-plugins:/app/plugins # Mount point for downloaded plugins
     environment:
-      - OPENHOP_PLUGIN_DIR=/app/plugins
-      - OPENHOP_ENABLE_PLUGINS=true
+      OPENHOP_PLUGIN_DIR=/app/plugins
+      OPENHOP_ENABLE_PLUGINS=true
     # If the modem requires separate handling, link it or use network_mode: host
 
   # If you are using the new decoupled modem layer:
@@ -27,8 +27,8 @@ services:
         TARGET_HASH: "origin/dev"
         #TARGET_HASH: "dcaa4ac"
     # Added environment variable to try to enable plugin manager, possibly NOT needed
-    environment:
-      OPENHOP_PLUGIN_MANAGER: "1"
+    #environment:
+    #  OPENHOP_PLUGIN_MANAGER: "1"
     privileged: true
     cap_add:
       - SYS_RAWIO

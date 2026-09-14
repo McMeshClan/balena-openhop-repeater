@@ -49,6 +49,9 @@ services:
     privileged: true
     # If the pluginmanager needs persistent storage across updates:
     volumes:
+      - config:/etc/openhop_repeater
+      - data:/var/lib/openhop_repeater
+      # New volume locations for the plugin manager ecosystem
       - openhop_plugins:/var/lib/openhop_repeater/plugins
       - openhop_plugin_cache:/var/cache/openhop_repeater/plugin-manager
 

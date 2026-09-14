@@ -45,5 +45,5 @@ volumes:
   config:
   data:
   # Add volumes for plugins
-  openhop-plugins: # Persistent volume for the plugin manager
+  openhop_plugins: # Persistent volume for the plugin manager
   openhop_plugin_cache: # Plugin cache volume

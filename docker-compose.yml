@@ -1,7 +1,7 @@
 version: '2.1'
 
-# REPEATER SERVICE
 services:
+  # REPEATER SERVICE
   openhop-repeater:
     build: 
       context: .
@@ -40,6 +40,17 @@ services:
       - "plugdev"
       - "gpio"
     restart: always
+  
+  # PLUGIN MANAGER SERVICE
+  pluginmanager:
+    build: ./pluginmanager
+    restart: always
+    network_mode: host
+    privileged: true
+    # If the pluginmanager needs persistent storage across updates:
+    volumes:
+      - openhop_plugins:/var/lib/openhop_repeater/plugins
+      - openhop_plugin_cache:/var/cache/openhop_repeater/plugin-manager
 
 volumes:
   config:

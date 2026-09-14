@@ -1,6 +1,7 @@
 version: '2.1'
 
-  # REPEATER SERVICE
+# REPEATER SERVICE
+services:
   openhop-repeater:
     build: 
       context: .

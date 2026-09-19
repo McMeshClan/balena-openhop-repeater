@@ -4,7 +4,7 @@ services:
   # REPEATER SERVICE
   openhop-repeater:
     build: 
-      context: https://github.com/openhop-dev/openhop_repeater.git#dev
+      context: .
       args:
         TARGET_HASH: "origin/dev"
         #TARGET_HASH: "dcaa4ac"

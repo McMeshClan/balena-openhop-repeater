@@ -1,506 +1,138 @@
-#!/bin/bash
-echo "docker-entrypoint.sh started"
+#!/bin/sh
+set -eu
 
-# Change ownership of GPIO devices to the 'gpio' group
-# and grant read/write access to that group.
-if [ -e /dev/gpiochip0 ]; then
-    echo "override gpio groups..."
-    sudo chgrp gpio /dev/gpiochip*
-    #sudo chmod g+rw /dev/gpiochip*
-    # should not need this, but debugging perms
-    sudo chmod a+rw /dev/gpiochip*
-fi
+INSTALL_DIR="${INSTALL_DIR:-/opt/openhop_repeater}"
+CONFIG_DIR="${CONFIG_DIR:-/etc/openhop_repeater}"
+CONFIG_PATH="${OPENHOP_REPEATER_CONFIG:-${PYMC_REPEATER_CONFIG:-${CONFIG_DIR}/config.yaml}}"
+EXAMPLE_PATH="${CONFIG_DIR}/config.yaml.example"
+BUNDLED_EXAMPLE_PATH="${INSTALL_DIR}/config.yaml.example"
+RUNTIME_USER="${USER:-repeater}"
+RUNTIME_UID="${PUID:-unknown}"
+RUNTIME_GID="${PGID:-unknown}"
+YQ_CMD="${YQ_CMD:-/usr/local/bin/yq}"
 
-# Change ownership of SPI devices to the 'gpio' group
-# and grant read/write access to that group.
-if [ -e /dev/spidev0.0 ]; then
-    echo "override spi groups..."
-    sudo chgrp gpio /dev/spidev*
-    #sudo chmod g+rw /dev/spidev*
-    # should not need this, but debugging perms
-    sudo chmod a+rw /dev/spi*
-fi
+mkdir -p "${CONFIG_DIR}"
 
-# If you also need access to gpiomem
-if [ -e /dev/gpiomem ]; then
-    echo "override gpiomem groups..."
-    sudo chgrp gpio /dev/gpiomem
-    #sudo chmod g+rw /dev/gpiomem
-    sudo chmod a+rw /dev/gpiomem
-fi
+print_permission_help() {
+    echo "If you are bind-mounting ./config or ./data, ensure the host paths are writable by ${RUNTIME_USER} (${RUNTIME_UID}:${RUNTIME_GID})." >&2
+    echo "For the default image user, run: sudo chown -R ${RUNTIME_UID}:${RUNTIME_GID} ./config ./data" >&2
+}
 
-ls -al /dev/gpi*
+fail_bad_config_mount() {
+    echo "Invalid Docker config mount: ${CONFIG_PATH} is a directory, but it must be the config file." >&2
+    echo "This usually happens when ./config.yaml is bind-mounted before that host file exists." >&2
+    echo "Use the supported folder mount instead:" >&2
+    echo "  - ./config:/etc/openhop_repeater" >&2
+    echo "Then place the config at ./config/config.yaml." >&2
+    print_permission_help
+    exit 1
+}
 
-if [[ "$OPENHOP_DEBUG" ]] && [[ ! "$OPENHOP_DELAY" ]]; then
-        OPENHOP_DELAY=180
-fi
-
-if [[ ! "$OPENHOP_DELAY" ]]; then
-        OPENHOP_DELAY=5
-fi
-echo "delay set to $OPENHOP_DELAY"
-
-if [[ ! "$RECYCLE" ]]; then
-        RECYCLE=6 # hours
-fi
-
-if [[ "$RECYCLE" == "false" ]]; then
-        RECYCLE_SECONDS=infinity
-        echo "recycle disabled"
-else
-        RECYCLE_SECONDS=$(( RECYCLE * 3600 ))
-        echo "recycle set to $RECYCLE hours (${RECYCLE_SECONDS}s)"
-fi
-
-
-# Configuration Paths
-LIB_DIR="/var/lib/openhop_repeater"
-CONFIG_DIR="/etc/openhop_repeater"
-OPT_DIR="/opt/openhop_repeater"
-SETTINGS_FILE="$LIB_DIR/radio-settings.json"
-CONFIG_FILE="$CONFIG_DIR/config.yaml"
-
-sudo chown -R repeater:repeater $CONFIG_DIR
-
-
-if [[ "$OPENHOP_CLEAN" ]]; then
-        echo "Nuke $LIB_DIR files"
-        rm -rf $LIB_DIR/repeat* $LIB_DIR/.config
-        OPENHOP_RESET=1
-fi
-
-if [[ "$OPENHOP_RESET" ]]; then
-        echo "Save Old Config in config.last"
-        cp "$CONFIG_FILE" "$CONFIG_DIR/config.last"
-        echo "Install default config.yaml"
-        cp "$OPT_DIR/config.yaml.example" "$CONFIG_FILE"
-fi
-
-
-# Seed the radio settings if missing
-if [ ! -f "$SETTINGS_FILE" ]; then
-    echo "Install radio files..."
-    sudo cp $OPT_DIR/radio* $LIB_DIR
-    sudo chown repeater:repeater $LIB_DIR/radio*
-fi
-# Seed the configuration if missing
-if [ ! -f "$CONFIG_FILE" ]; then
-    echo "Initializing default configuration..."
-    sudo cp $OPT_DIR/config.yaml.example $CONFIG_FILE
-    sudo chown repeater:repeater $CONFIG_FILE
-fi
-
-# POLICY=override forces the default policy.yaml, replacing any existing one.
-# POLICY=1/true seeds the default policy.yaml only if one isn't already present.
-# Unset/blank POLICY leaves policy.yaml alone entirely.
-POLICY_FILE="$CONFIG_DIR/policy.yaml"
-if [[ "$POLICY" == "override" ]]; then
-    echo "POLICY=override, forcing default policy.yaml..."
-    sudo cp "$OPT_DIR/policy.yaml.example" "$POLICY_FILE"
-    sudo chown repeater:repeater "$POLICY_FILE"
-elif [[ "$POLICY" ]] && [ ! -f "$POLICY_FILE" ]; then
-    echo "Seeding default policy.yaml..."
-    sudo cp "$OPT_DIR/policy.yaml.example" "$POLICY_FILE"
-    sudo chown repeater:repeater "$POLICY_FILE"
-fi
-
-# make changes to config.yaml as needed
-cd $CONFIG_DIR
-
-if [[ "$OWNER" ]]; then
-    echo "Set owner_info to $OWNER"
-    yq -i '.repeater.owner_info = env(OWNER)' config.yaml
-    yq -i '.mqtt_brokers.owner = env(OWNER)' config.yaml
-fi
-
-if [[ "$NODE_NAME" ]]; then
-    echo "Set node_name to $NODE_NAME"
-    # Use as the container's syslog hostname too, so forwarded log lines show
-    # the friendly node name instead of the container's default short ID.
-    sudo hostname "$NODE_NAME" 2>/dev/null || echo "Could not set hostname to $NODE_NAME (continuing)"
-    CURRENT_NAME=$(yq '.repeater.node_name // ""' config.yaml)
-    if [[ "$CURRENT_NAME" != "$NODE_NAME" ]]; then
-        yq -i '.repeater.node_name = env(NODE_NAME)' config.yaml
-    fi
-    CURRENT_SITE=$(yq '.web.site_name // ""' config.yaml)
-    if [[ -z "$CURRENT_SITE" || "$CURRENT_SITE" == "null" ]]; then
-        SITE_NAME="${NODE_NAME^^}"
-        export SITE_NAME
-        yq -i '.web.site_name = env(SITE_NAME)' config.yaml
-    fi
-fi
-
-if [[ "$LAT" ]]; then
-    echo "Set LAT to $LAT"
-    yq -i '.repeater.latitude = env(LAT)' config.yaml
-fi
-
-if [[ "$LON" ]]; then
-    echo "Set LON to $LON"
-    yq -i '.repeater.longitude = env(LON)' config.yaml
-fi
-
-if [ "$US" ]; then
-    echo "Set radio to US defaults"
-    yq -iP '
-      .radio.bandwidth = 62500 |
-      .radio.coding_rate = 5 |
-      .radio.frequency = 910525000 |
-      .radio.implicit_header = false |
-      .radio.preamble_length = 17 |
-      .radio.spreading_factor = 7 |
-      .radio.tx_power = 14 
-    ' $CONFIG_FILE 
-fi
-
-if [ "$RADIO" ]; then
-    if [ ! -f "$SETTINGS_FILE" ]; then
-        echo "Error: $SETTINGS_FILE not found."
+copy_or_die() {
+    src="$1"
+    dest="$2"
+    if ! cp "${src}" "${dest}"; then
+        echo "Failed to initialize ${dest} from ${src}." >&2
+        print_permission_help
         exit 1
     fi
+}
 
-    # Assume sx1262 for now
-    echo "Set radio to sx1262"
-    echo '---------------------debug------------'
-    yq -iP '
-      .radio_type = "sx1262"
-    ' $CONFIG_FILE 
+use_runtime_merged_config() {
+    src="$1"
+    runtime_dir="$(mktemp -d /tmp/openhop-repeater-config.XXXXXX)"
+    runtime_config="${runtime_dir}/config.yaml"
 
-
-    if [ "$RADIO" = "nebra" ]; then
-        RADIO="nebrahat"
-        echo "Detected 'nebra', updated radio to 'nebrahat'."
+    if ! cp "${src}" "${runtime_config}"; then
+        echo "Failed to prepare temporary merged config at ${runtime_config}; keeping the existing config." >&2
+        return 1
     fi
 
+    CONFIG_PATH="${runtime_config}"
+    echo "Using merged config from ${CONFIG_PATH} for this container start only." >&2
+    echo "Fix the bind-mounted config ownership so future upgrades can persist merged config changes." >&2
+    print_permission_help
+    return 0
+}
 
-    # Now read the radio presets, and then save into config.yaml
-    # Have to do this in two steps due to yq funkiness
-    echo Lookup $RADIO and update values into $CONFIG_FILE
-
-    RADIO_JSON=$(jq -c ".hardware.$RADIO | del(.name, .tx_power, .preamble_length)" "$SETTINGS_FILE")
-    export RADIO_JSON
-    echo "Read JSON: $RADIO_JSON"
-    echo "As YAML:"
-    echo "$RADIO_JSON" | yq -pj -P '.'
-    echo "Writing to $CONFIG_FILE"
-    yq -iP '.sx1262 *= (strenv(RADIO_JSON) | from_json)' "$CONFIG_FILE"
-fi
-
-# Turn power down on nebrahat
-if [ "$RADIO" = "nebrahat" ]; then
-    echo "Lower radio power for nebrahats"
-    yq -iP "
-      .radio.tx_power = 8
-    " $CONFIG_FILE
-fi
-
-# allow power override though
-if [ "$PWR" ]; then
-    echo "Set radio power to to $PWR"
-    yq -iP "
-      .radio.tx_power = $PWR
-    " $CONFIG_FILE
-fi
-
-
-if [[ "$KEY_HEX" ]]; then
-    echo "Set KEY_HEX to $KEY_HEX"
-    #KEY_BASE64=$(python3 -c "import base64, binascii; print(base64.b64encode(binascii.unhexlify('$KEY_HEX')).decode())")
-
-    KEY_BASE64=$(python3 -c "import sys, base64; print(base64.b64encode(bytes.fromhex('$KEY_HEX')).decode())")
-    echo "$KEY_HEX"
-    echo "$KEY_BASE64"
-    export KEY_BASE64
-fi
-
-if [[ "$KEY_BASE64" ]]; then
-    echo "Set KEY_BASE64 to $KEY_BASE64"
-    yq -i '.repeater.identity_key = env(KEY_BASE64) | .repeater.identity_key tag="!!binary"' config.yaml
-fi
-
-if [[ "$MAXFLOODHOPS" ]]; then
-    echo "Set MAXFLOODHOPS to $MAXFLOODHOPS"
-    yq -i '.repeater.max_flood_hops = env(MAXFLOODHOPS)' config.yaml
-fi
-
-if [[ "$MAXCLIENTS" ]]; then
-    echo "Set MAXCLIENTS to $MAXCLIENTS"
-    yq -i '.repeater.security.max_clients = env(MAXCLIENTS)' config.yaml
-fi
-
-if [[ "$ADMIN" ]]; then
-    echo "Set ADMIN pw to $ADMIN"
-    yq -i '.repeater.security.admin_password = env(ADMIN)' config.yaml
-fi
-
-if [[ "$GUEST" == "null" ]]; then
-    echo "Set GUEST pw to null"
-    yq -i '.repeater.security.guest_password = null' config.yaml
-elif [[ "$GUEST" ]]; then
-    echo "Set GUEST pw to $GUEST"
-    yq -i '.repeater.security.guest_password = env(GUEST)' config.yaml
-fi
-
-if [[ "$READONLY" ]]; then
-    echo "Set READONLY to $READONLY"
-    yq -i '.repeater.security.allow_read_only = env(READONLY)' config.yaml
-fi
-
-if [[ "$ADVERT" ]]; then
-    echo "Set ADVERT to $ADVERT"
-    yq -i '.repeater.send_advert_interval_hours = env(ADVERT)' config.yaml
-fi
-
-if [[ "$ADAPTIVE" =~ ^(true|false)$ ]]; then
-    echo "Set ADAPTIVE to $ADAPTIVE"
-    yq -i '.repeater.advert_adaptive.enabled = env(ADAPTIVE)' config.yaml
-elif [[ "$ADAPTIVE" ]]; then
-    echo "ADAPTIVE=$ADAPTIVE is not valid, must be true or false, skipping"
-fi
-
-if [[ "$LIMIT" =~ ^(true|false)$ ]]; then
-    echo "Set LIMIT to $LIMIT"
-    yq -i '.repeater.advert_rate_limit.enabled = env(LIMIT)' config.yaml
-elif [[ "$LIMIT" ]]; then
-    echo "LIMIT=$LIMIT is not valid, must be true or false, skipping"
-fi
-
-if [[ "$PENALTY" =~ ^(true|false)$ ]]; then
-    echo "Set PENALTY to $PENALTY"
-    yq -i '.repeater.advert_penalty_box.enabled = env(PENALTY)' config.yaml
-elif [[ "$PENALTY" ]]; then
-    echo "PENALTY=$PENALTY is not valid, must be true or false, skipping"
-fi
-
-if [[ "$UNSCOPED" ]]; then
-    echo "Set UNSCOPED to $UNSCOPED"
-    yq -i '.mesh.unscoped_flood_allow = env(UNSCOPED)' config.yaml
-fi
-
-if [[ "$REGION_DEFAULT" =~ ^[a-z0-9-]+$ ]]; then
-    echo "Set REGION_DEFAULT to $REGION_DEFAULT"
-    yq -i '.mesh.default_region = env(REGION_DEFAULT)' config.yaml
-elif [[ "$REGION_DEFAULT" ]]; then
-    echo "REGION_DEFAULT=$REGION_DEFAULT is not valid, skipping"
-fi
-
-if [[ "$PATHHASH" ]]; then
-    echo "Set PATHHASH to $PATHHASH"
-    yq -i '.mesh.path_hash_mode = env(PATHHASH)' config.yaml
-fi
-
-if [[ "$TXDELAY" ]]; then
-    echo "Set TXDELAY to $TXDELAY"
-    yq -i '.delays.tx_delay_factor = env(TXDELAY)' config.yaml
-fi
-
-if [[ "$IATA" ]]; then
-    echo "Set IATA to $IATA"
-    yq -i '.mqtt_brokers.iata_code = env(IATA)' config.yaml
-fi
-
-if [[ "$EMAIL" ]]; then
-    echo "Set EMAIL to $EMAIL"
-    yq -i '.mqtt_brokers.email = env(EMAIL)' config.yaml
-fi
-
-# Update the password if one was provided
-if [[ "$PASSWD" ]]; then
-    echo "Setting password to $PASSWD"
-
-    # Remove immutability if it exists to allow password update
-    chattr -i /etc/shadow 2>/dev/null
-    # Apply the password from a Balena Environment Variable (set in dashboard)
-    if [ -n "$PASSWORD" ]; then
-        echo "repeater:$PASSWORD" | chpasswd
+merge_config_from_example() {
+    config_path="$1"
+    # Image defaults evolve on upgrade; preserve the volume's example unchanged.
+    merge_example_path="${EXAMPLE_PATH}"
+    if [ -f "${BUNDLED_EXAMPLE_PATH}" ]; then
+        merge_example_path="${BUNDLED_EXAMPLE_PATH}"
     fi
-    chattr +i /etc/shadow 2>/dev/null
+
+    if [ ! -f "${config_path}" ] || [ ! -f "${merge_example_path}" ]; then
+        return 0
+    fi
+
+    if [ ! -x "${YQ_CMD}" ] || ! "${YQ_CMD}" --version 2>&1 | grep -q "mikefarah/yq"; then
+        echo "Skipping config merge: mikefarah yq is not available at ${YQ_CMD}." >&2
+        return 0
+    fi
+
+    tmpdir="$(mktemp -d)"
+    stripped_user="${tmpdir}/config.stripped.yaml"
+    merged_config="${tmpdir}/config.merged.yaml"
+
+    cleanup_merge() {
+        rm -rf "${tmpdir}"
+    }
+    trap cleanup_merge EXIT HUP INT TERM
+
+    # Keep only the example's comments to avoid comment duplication across upgrades.
+    "${YQ_CMD}" eval '... comments=""' "${config_path}" > "${stripped_user}" 2>/dev/null || cp "${config_path}" "${stripped_user}"
+
+    if ! "${YQ_CMD}" eval-all '. as $item ireduce ({}; . * $item)' "${merge_example_path}" "${stripped_user}" > "${merged_config}" 2>/dev/null; then
+        echo "Failed to merge ${config_path} with ${merge_example_path}; keeping the existing config." >&2
+        cleanup_merge
+        trap - EXIT HUP INT TERM
+        return 0
+    fi
+
+    if ! "${YQ_CMD}" eval '.' "${merged_config}" >/dev/null 2>&1; then
+        echo "Merged config for ${config_path} is invalid; keeping the existing config." >&2
+        cleanup_merge
+        trap - EXIT HUP INT TERM
+        return 0
+    fi
+
+    if ! cmp -s "${config_path}" "${merged_config}"; then
+        if ! cp "${merged_config}" "${config_path}"; then
+            echo "Failed to update ${config_path} from merged config; the bind-mounted config is not writable." >&2
+            use_runtime_merged_config "${merged_config}" || true
+        fi
+    fi
+
+    cleanup_merge
+    trap - EXIT HUP INT TERM
+}
+
+if [ -d "${CONFIG_PATH}" ] && [ "$(basename "${CONFIG_PATH}")" = "config.yaml" ]; then
+    fail_bad_config_mount
 fi
 
-# BROKER=override forces both the mqtt_broker.yaml file and config.yaml's
-# mqtt_brokers.brokers back to the default example, every restart.
-# BROKER=1/true seeds mqtt_broker.yaml only if missing, and merges it into
-# config.yaml only if brokers aren't already configured there — so GUI-made
-# broker edits (which live in config.yaml) survive restarts.
-MQTT_BROKER_FILE="$CONFIG_DIR/mqtt_broker.yaml"
-if [[ "$BROKER" == "override" ]]; then
-    echo "BROKER=override, forcing default mqtt_broker.yaml..."
-    cp "$OPT_DIR/mqtt_broker.yaml.example" "$MQTT_BROKER_FILE"
-    sudo chown repeater:repeater "$MQTT_BROKER_FILE"
-elif [[ "$BROKER" ]] && [ ! -f "$MQTT_BROKER_FILE" ]; then
-    echo "Seeding default mqtt_broker.yaml..."
-    cp "$OPT_DIR/mqtt_broker.yaml.example" "$MQTT_BROKER_FILE"
-    sudo chown repeater:repeater "$MQTT_BROKER_FILE"
-fi
-
-if [[ "$BROKER" ]] && [ -f "$MQTT_BROKER_FILE" ]; then
-    CURRENT_BROKERS=$(yq '.mqtt_brokers.brokers // [] | length' config.yaml)
-    if [[ "$BROKER" == "override" ]] || [[ "$CURRENT_BROKERS" == "0" ]]; then
-        echo "Setting up mqtt brokers"
-        yq -i '.mqtt_brokers.brokers = load("mqtt_broker.yaml")' config.yaml
-    else
-        echo "mqtt_brokers.brokers already configured, leaving as-is (set BROKER=override to force)"
+if [ ! -f "${EXAMPLE_PATH}" ] && [ -f "${BUNDLED_EXAMPLE_PATH}" ]; then
+    if ! cp "${BUNDLED_EXAMPLE_PATH}" "${EXAMPLE_PATH}"; then
+        echo "Could not copy bundled example config to ${EXAMPLE_PATH}; using bundled example for config merge only." >&2
+        print_permission_help
+        EXAMPLE_PATH="${BUNDLED_EXAMPLE_PATH}"
     fi
 fi
 
-# mqtt_secret.yaml is a manual, gitignored companion to mqtt_broker.yaml for
-# brokers that carry real credentials (e.g. a private/paid feed). Same list
-# format, so entries can be copied straight from mqtt_broker.yaml. If present,
-# its entries are merged into config.yaml's mqtt_brokers.brokers on every
-# start (replacing any prior entry with the same name), independent of
-# BROKER. It is never written back out, unlike mqtt_broker.yaml below.
-MQTT_SECRET_FILE="$CONFIG_DIR/mqtt_secret.yaml"
-if [ -f "$MQTT_SECRET_FILE" ]; then
-    echo "Including brokers from mqtt_secret.yaml"
-    while IFS= read -r NAME; do
-        [ -z "$NAME" ] && continue
-        export NAME
-        yq -i 'del(.mqtt_brokers.brokers[] | select(.name == strenv(NAME)))' config.yaml
-    done < <(yq '.[].name' "$MQTT_SECRET_FILE")
-    yq -i '.mqtt_brokers.brokers = ((.mqtt_brokers.brokers // []) + load("mqtt_secret.yaml"))' config.yaml
-fi
-
-
-# start ntp, defaults are fine
-echo "Starting ntpd"
-sudo /usr/sbin/ntpd 
-
-# start sshd
-if [[ "$SSH" ]]; then
-    echo "Starting sshd"
-    sudo /usr/sbin/sshd
-fi
-
-if [[ "$SYSLOG" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*(:[0-9]+)?$ ]]; then
-    # Default to port 514 if not specified
-    if [[ "$SYSLOG" == *:* ]]; then
-        SYSLOG_TARGET="$SYSLOG"
-    else
-        SYSLOG_TARGET="${SYSLOG}:514"
+if [ -d "${CONFIG_PATH}" ]; then
+    if [ ! -s "${CONFIG_PATH}/config.yaml" ] && [ -f "${EXAMPLE_PATH}" ]; then
+        copy_or_die "${EXAMPLE_PATH}" "${CONFIG_PATH}/config.yaml"
     fi
-    SYSLOG_CONF="$CONFIG_DIR/rsyslog.conf"
-    if [ ! -f "$SYSLOG_CONF" ]; then
-        echo "Creating rsyslog.conf targeting $SYSLOG_TARGET..."
-        cat > "$SYSLOG_CONF" << EOF
-# rsyslog.conf - openhop_repeater
-# Edit as needed; SYSLOG env var updates the active forwarding target on restart.
-
-# Creates /dev/log for local syslog() calls
-module(load="imuxsock")
-
-# Forward all messages to remote syslog server (UDP):
-*.* @${SYSLOG_TARGET}
-
-# Alternate TCP (more reliable, change @ to @@):
-# *.* @@${SYSLOG_TARGET}
-
-# Log to a local file instead:
-# *.* /var/log/syslog
-EOF
-    else
-        echo "Updating rsyslog.conf target to $SYSLOG_TARGET..."
-        sed -i "s|^\*\.\* @[^@].*|*.* @${SYSLOG_TARGET}|" "$SYSLOG_CONF"
-    fi
-    echo "Starting rsyslogd"
-    sudo rsyslogd -f "$SYSLOG_CONF" &
+    CONFIG_PATH="${CONFIG_PATH}/config.yaml"
+elif [ ! -s "${CONFIG_PATH}" ] && [ -f "${EXAMPLE_PATH}" ]; then
+    copy_or_die "${EXAMPLE_PATH}" "${CONFIG_PATH}"
 fi
 
-if [[ "$CLOUDFLARE" ]]; then
-    echo "Starting cloudflared"
-    echo cloudflared --loglevel warn tunnel run --token "$CLOUDFLARE"
-    (sleep 20 ; /usr/local/bin/cloudflared --loglevel warn \
-    tunnel run --token "$CLOUDFLARE") &
-    #sudo /usr/local/bin/cloudflared --loglevel warn tunnel run --token "$CLOUDFLARE"
-fi
+merge_config_from_example "${CONFIG_PATH}"
 
-
-
-grep -q 'pymc_repeater' "$CONFIG_FILE" && sed -i 's|pymc_repeater|openhop_repeater|g' "$CONFIG_FILE"
-
-if [[ "$SYSLOG" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*(:[0-9]+)?$ ]]; then
-    LOG_TAG="openhop-repeater"
-    echo "Logging to syslog as $LOG_TAG"
-    # Redirect the rest of this script's stdout/stderr through tee+logger,
-    # rather than piping just the app, so `openhop-repeater &` below stays
-    # the last command and $! is its own PID (not tee's).
-    exec > >(tee >(logger -t "$LOG_TAG")) 2>&1
-fi
-
-echo "docker-entrypoint.sh starting app, recycling every ${RECYCLE}s"
-
-# REGIONS=override forces the default regions.yaml, replacing any existing one.
-# REGIONS=1/true seeds regions.yaml from the default example only if missing.
-# Either way, the resulting file is then loaded into repeater.db's
-# transport_keys table (full replace via load-regions) prior to starting
-# openhop-repeater.
-REGIONS_FILE="$CONFIG_DIR/regions.yaml"
-if [[ "$REGIONS" == "override" ]]; then
-    echo "REGIONS=override, forcing default regions.yaml..."
-    cp "$OPT_DIR/regions.yaml.example" "$REGIONS_FILE"
-    sudo chown repeater:repeater "$REGIONS_FILE"
-elif [[ "$REGIONS" ]] && [ ! -f "$REGIONS_FILE" ]; then
-    echo "Seeding default regions.yaml..."
-    cp "$OPT_DIR/regions.yaml.example" "$REGIONS_FILE"
-    sudo chown repeater:repeater "$REGIONS_FILE"
-fi
-
-if [[ "$REGIONS" ]] && [ -f "$REGIONS_FILE" ]; then
-    echo "Loading regions from $REGIONS_FILE"
-    load-regions "$REGIONS_FILE"
-fi
-
-# Now run the application
-#exec "$@"
-openhop-repeater &
-APP_PID=$!
-echo "openhop-repeater started (pid $APP_PID)"
-
-( sleep "$RECYCLE_SECONDS" ) &
-TIMER_PID=$!
-
-# Wait for whichever finishes first: the app exiting, or the recycle timer.
-wait -n "$APP_PID" "$TIMER_PID"
-
-if kill -0 "$APP_PID" 2>/dev/null; then
-    echo "RECYCLE timer (${RECYCLE} hours) expired, stopping openhop-repeater (pid $APP_PID)"
-    kill "$APP_PID"
-    wait "$APP_PID" 2>/dev/null
-else
-    echo "openhop-repeater stopped on its own (pid $APP_PID)"
-fi
-kill "$TIMER_PID" 2>/dev/null
-wait "$TIMER_PID" 2>/dev/null
-
-echo "OPENHOP exited, backing up $LIB_DIR to $CONFIG_DIR/backup"
-mkdir -p "$CONFIG_DIR/backup"
-cp "$LIB_DIR"/rep* "$CONFIG_DIR/backup/"
-
-echo "Refreshing $MQTT_BROKER_FILE from current config.yaml brokers"
-if [ -f "$MQTT_BROKER_FILE" ]; then
-    cp "$MQTT_BROKER_FILE" "$CONFIG_DIR/backup/mqtt_broker.yaml"
-fi
-# Exclude any brokers sourced from mqtt_secret.yaml so their credentials never
-# get written into mqtt_broker.yaml - that file is user-editable/shareable and
-# is not meant to hold secrets.
-BROKER_DUMP_SRC="$CONFIG_FILE"
-if [ -f "$MQTT_SECRET_FILE" ]; then
-    BROKER_DUMP_SRC="$CONFIG_DIR/.broker_dump.yaml"
-    cp "$CONFIG_FILE" "$BROKER_DUMP_SRC"
-    while IFS= read -r NAME; do
-        [ -z "$NAME" ] && continue
-        export NAME
-        yq -i 'del(.mqtt_brokers.brokers[] | select(.name == strenv(NAME)))' "$BROKER_DUMP_SRC"
-    done < <(yq '.[].name' "$MQTT_SECRET_FILE")
-fi
-yq '.mqtt_brokers.brokers' "$BROKER_DUMP_SRC" > "$MQTT_BROKER_FILE"
-[ "$BROKER_DUMP_SRC" != "$CONFIG_FILE" ] && rm -f "$BROKER_DUMP_SRC"
-sudo chown repeater:repeater "$MQTT_BROKER_FILE"
-
-if [[ "$REGIONS" ]]; then
-    echo "Saving current regions to $REGIONS_FILE"
-    dump-regions -o "$REGIONS_FILE"
-fi
-
-echo "sleeping $OPENHOP_DELAY seconds"
-sleep $OPENHOP_DELAY
-echo "docker-entrypoint.sh exit"
+# Keep Repeater and its optional plugin manager under one PID 1 supervisor.
+# The supervisor forwards shutdown signals to both process groups and restarts
+# the plugin manager if it exits while Repeater is still running.
+exec python3 -m repeater.plugins.container_supervisor --config "${CONFIG_PATH}"
